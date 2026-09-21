@@ -59,7 +59,9 @@ CREATE TABLE IF NOT EXISTS energy (
 `)
 
 // 迁移：旧版 scene_actions 只有 device_key（名称），重建为 device_id 稳定关联。
-// 重名设备绑定最小 id；名称已找不到（设备被删）的置 NULL 保留为失效引用。
+// 名称唯一命中的正常绑定；重名设备无法判定原引用究竟指向哪一台，一律置 NULL（保留名称快照，
+// 待人工重新绑定）——绝不能擅自绑到最小 ID，否则触发场景会误控同名的其他设备。
+// 名称已找不到（设备被删）的同样置 NULL，保留为失效引用。
 function migrateSceneActions() {
   const cols = db.prepare('PRAGMA table_info(scene_actions)').all().map((c) => c.name)
   if (cols.includes('device_id')) return
@@ -79,9 +81,16 @@ function migrateSceneActions() {
     const ins = db.prepare('INSERT INTO scene_actions_migrated (id,scene_id,device_id,device_key,action,order_no) VALUES (?,?,?,?,?,?)')
     for (const r of rows) {
       const m = findByName.all(r.device_key)
-      if (m.length > 1) dup++
-      if (!m.length) lost++
-      ins.run(r.id, r.scene_id, m.length ? m[0].id : null, r.device_key, r.action, r.order_no)
+      let deviceId = null
+      if (m.length === 1) {
+        deviceId = m[0].id
+      } else if (m.length > 1) {
+        // 重名歧义：不猜、不绑，置 NULL 交由用户重新确认
+        dup++
+      } else {
+        lost++
+      }
+      ins.run(r.id, r.scene_id, deviceId, r.device_key, r.action, r.order_no)
     }
     db.exec('DROP TABLE scene_actions')
     db.exec('ALTER TABLE scene_actions_migrated RENAME TO scene_actions')
@@ -92,7 +101,7 @@ function migrateSceneActions() {
   }
   if (dup || lost) {
     db.prepare('INSERT INTO device_logs (device_name,action,detail,time) VALUES (?,?,?,?)')
-      .run('系统', '迁移场景动作', `重名设备按最小ID绑定 ${dup} 条；失效引用 ${lost} 条（原设备已删除）`, new Date().toLocaleString('zh-CN'))
+      .run('系统', '迁移场景动作', `重名设备无法确定归属，未自动绑定 ${dup} 条（需手动重新绑定）；失效引用 ${lost} 条（原设备已删除）`, new Date().toLocaleString('zh-CN'))
   }
 }
 migrateSceneActions()

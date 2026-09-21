@@ -25,9 +25,15 @@ app.get('/api/state', (req, res) => {
     devices: q(`SELECT d.*, r.name room, t.name type_name, t.icon type_icon
                 FROM devices d JOIN rooms r ON r.id=d.room_id JOIN device_types t ON t.id=d.type_id`),
     scenes: q('SELECT * FROM scenes').map((s) => {
-      const actions = q(`SELECT sa.id, sa.device_id, sa.device_key, sa.action, d.name device_name
+      const actions = q(`SELECT sa.id, sa.device_id, sa.device_key, sa.action, d.name device_name,
+                                (SELECT COUNT(*) FROM devices x WHERE x.name=sa.device_key) key_match_count
                          FROM scene_actions sa LEFT JOIN devices d ON d.id=sa.device_id
                          WHERE sa.scene_id=? ORDER BY sa.order_no, sa.id`, s.id)
+        .map((a) => ({
+          ...a,
+          // device_id 为空时区分原因：同名设备不止一台=迁移时无法判定归属，需人工重新绑定；否则为设备已删除
+          unresolved: !a.device_name ? (a.key_match_count > 1 ? 'duplicate' : 'missing') : null
+        }))
       return { ...s, action_count: actions.length, actions }
     }),
     logs: q('SELECT * FROM device_logs ORDER BY id DESC LIMIT 50'),
@@ -126,15 +132,19 @@ app.post('/api/scene/:id/run', (req, res) => {
   const s = q1('SELECT * FROM scenes WHERE id=?', req.params.id)
   if (!s) return res.status(404).json({ error: 'not found' })
   if (!s.enabled) return res.status(409).json({ error: '场景已停用，无法执行' })
-  const actions = q(`SELECT sa.*, d.id did, d.name dname, d.status dstatus
+  const actions = q(`SELECT sa.*, d.id did, d.name dname, d.status dstatus,
+                            (SELECT COUNT(*) FROM devices x WHERE x.name=sa.device_key) key_match_count
                      FROM scene_actions sa LEFT JOIN devices d ON d.id=sa.device_id
                      WHERE sa.scene_id=? ORDER BY sa.order_no, sa.id`, s.id)
   const executed = [], failed = []
   for (const a of actions) {
     const label = a.dname || a.device_key || `设备#${a.device_id ?? '?'}`
     if (!a.did) {
-      failed.push({ device: label, action: a.action, reason: '设备已删除' })
-      log(label, `场景「${s.name}」执行失败`, `${a.action}（设备已删除）`)
+      // 未绑定动作一律跳过，绝不按名称猜测执行，避免误控同名设备
+      const duplicate = a.key_match_count > 1
+      const reason = duplicate ? '存在重名设备，待重新绑定' : '设备已删除'
+      failed.push({ device: label, action: a.action, reason })
+      log(label, `场景「${s.name}」执行失败`, `${a.action}（${reason}）`)
       continue
     }
     if (a.dstatus !== 'online') {
