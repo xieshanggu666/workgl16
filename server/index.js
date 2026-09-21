@@ -28,6 +28,12 @@ app.get('/api/state', (req, res) => {
       const actions = q(`SELECT sa.id, sa.device_id, sa.device_key, sa.action, d.name device_name
                          FROM scene_actions sa LEFT JOIN devices d ON d.id=sa.device_id
                          WHERE sa.scene_id=? ORDER BY sa.order_no, sa.id`, s.id)
+        .map((a) => ({
+          ...a,
+          // 未绑定且名称对应多台现存设备 → 重名待确认（区别于设备已删除）
+          ambiguous: a.device_id == null && !!a.device_key &&
+            q1('SELECT COUNT(*) c FROM devices WHERE name=?', a.device_key).c > 1
+        }))
       return { ...s, action_count: actions.length, actions }
     }),
     logs: q('SELECT * FROM device_logs ORDER BY id DESC LIMIT 50'),
@@ -133,8 +139,11 @@ app.post('/api/scene/:id/run', (req, res) => {
   for (const a of actions) {
     const label = a.dname || a.device_key || `设备#${a.device_id ?? '?'}`
     if (!a.did) {
-      failed.push({ device: label, action: a.action, reason: '设备已删除' })
-      log(label, `场景「${s.name}」执行失败`, `${a.action}（设备已删除）`)
+      // 未绑定动作：区分「重名待确认」与「设备已删除」，绝不猜测执行
+      const sameName = a.device_key ? q1('SELECT COUNT(*) c FROM devices WHERE name=?', a.device_key).c : 0
+      const reason = sameName > 1 ? '存在重名设备，未绑定（需人工确认）' : '设备已删除'
+      failed.push({ device: label, action: a.action, reason })
+      log(label, `场景「${s.name}」执行失败`, `${a.action}（${reason}）`)
       continue
     }
     if (a.dstatus !== 'online') {

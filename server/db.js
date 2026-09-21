@@ -1,6 +1,7 @@
 import { DatabaseSync } from 'node:sqlite'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
+import { migrateSceneActions } from './migrate.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 export const db = new DatabaseSync(path.join(__dirname, 'home.db'))
@@ -59,43 +60,14 @@ CREATE TABLE IF NOT EXISTS energy (
 `)
 
 // 迁移：旧版 scene_actions 只有 device_key（名称），重建为 device_id 稳定关联。
-// 重名设备绑定最小 id；名称已找不到（设备被删）的置 NULL 保留为失效引用。
-function migrateSceneActions() {
-  const cols = db.prepare('PRAGMA table_info(scene_actions)').all().map((c) => c.name)
-  if (cols.includes('device_id')) return
-  const rows = db.prepare('SELECT * FROM scene_actions').all()
-  const findByName = db.prepare('SELECT id FROM devices WHERE name=? ORDER BY id')
-  let dup = 0, lost = 0
-  db.exec('BEGIN')
-  try {
-    db.exec(`CREATE TABLE scene_actions_migrated (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      scene_id INTEGER NOT NULL,
-      device_id INTEGER REFERENCES devices(id) ON DELETE SET NULL,
-      device_key TEXT NOT NULL DEFAULT '',
-      action TEXT NOT NULL,
-      order_no INTEGER NOT NULL DEFAULT 0
-    )`)
-    const ins = db.prepare('INSERT INTO scene_actions_migrated (id,scene_id,device_id,device_key,action,order_no) VALUES (?,?,?,?,?,?)')
-    for (const r of rows) {
-      const m = findByName.all(r.device_key)
-      if (m.length > 1) dup++
-      if (!m.length) lost++
-      ins.run(r.id, r.scene_id, m.length ? m[0].id : null, r.device_key, r.action, r.order_no)
-    }
-    db.exec('DROP TABLE scene_actions')
-    db.exec('ALTER TABLE scene_actions_migrated RENAME TO scene_actions')
-    db.exec('COMMIT')
-  } catch (e) {
-    db.exec('ROLLBACK')
-    throw e
-  }
-  if (dup || lost) {
-    db.prepare('INSERT INTO device_logs (device_name,action,detail,time) VALUES (?,?,?,?)')
-      .run('系统', '迁移场景动作', `重名设备按最小ID绑定 ${dup} 条；失效引用 ${lost} 条（原设备已删除）`, new Date().toLocaleString('zh-CN'))
-  }
+// 仅名称唯一匹配才自动绑定；重名设备不擅自绑定（置 NULL 待人工确认），避免误控。
+const mig = migrateSceneActions(db)
+if (mig && (mig.dup || mig.lost)) {
+  db.prepare('INSERT INTO device_logs (device_name,action,detail,time) VALUES (?,?,?,?)')
+    .run('系统', '迁移场景动作',
+      `唯一匹配绑定 ${mig.bound} 条；重名未绑定 ${mig.dup} 条（需人工确认）；失效引用 ${mig.lost} 条（原设备已删除）`,
+      new Date().toLocaleString('zh-CN'))
 }
-migrateSceneActions()
 
 // 初始化（仅首次）
 function seed() {

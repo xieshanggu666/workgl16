@@ -44,7 +44,7 @@
         </div>
         <div class="actions">
           <div v-for="a in s.actions" :key="a.id" class="act-chip" :class="{invalid:!a.device_name}">
-            <span class="k">{{ a.device_name || a.device_key || '未知设备' }}<em v-if="!a.device_name">已删除</em></span>
+            <span class="k">{{ a.device_name || a.device_key || '未知设备' }}<em v-if="!a.device_name">{{ a.ambiguous ? '重名待确认' : '已删除' }}</em></span>
             <span class="v">{{ a.action }}</span>
           </div>
           <span v-if="!s.actions.length" class="noact">无动作</span>
